@@ -1,3 +1,8 @@
 fastapi
 uvicorn
+pydantic
+supabase
+huggingface-hub
+openai
+google-genai
 python-dotenv
