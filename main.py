@@ -137,4 +137,11 @@ async def chat_rag(request: ChatRequest):
         return {"reply": jawaban_akhir, "context_used": dokumen_ditemukan}
 
     except Exception as e:
+        # Ini akan memaksa error muncul di 'Deploy Logs' Railway
+        print("--- DEBUG ERROR START ---")
+        import traceback
+        traceback.print_exc() 
+        print(f"ERROR MESSAGE: {str(e)}")
+        print("--- DEBUG ERROR END ---")
+        
         raise HTTPException(status_code=500, detail=str(e))
