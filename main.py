@@ -87,7 +87,7 @@ async def chat_rag(request: ChatRequest):
                 raise Exception("Kunci API Gemini tidak tersedia")
 
             gemini_config = types.GenerateContentConfig(
-                system_instruction="Kamu adalah WAMchat, asisten AI pintar. Jawab pertanyaan HANYA berdasarkan konteks yang diberikan. Jika jawaban tidak ada di konteks, katakan kamu tidak tahu dengan sopan.",
+                system_instruction="Kamu adalah WAMchat, asisten AI pintar. Jawab pertanyaan HANYA berdasarkan konteks yang diberikan. Jika jawaban tidak ada di konteks, katakan kamu tidak tahu dengan sopan. Jawabannya jangan ada kata seperti 'berdasarkan informasi yang saya miliki' atau 'menurut data yang tersedia'. Tapi jangan bilang kamu tidak tahu jika tidak ada di konteks, jawab saja dengan informasi yang tersedia tapi beri sedikit ralat dan klarifikasinya.",
                 temperature=0.3,
             )
             
