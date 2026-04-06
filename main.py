@@ -46,7 +46,7 @@ async def chat_rag(request: ChatRequest):
     try:
         user_text = request.message
         
-        # 1. EMBEDDING (Hugging Face E5)
+        # 1. EMBEDDING
         query_text = f"query: {user_text}"
         hasil_vektor = hf_client.feature_extraction(
             query_text,
@@ -54,7 +54,7 @@ async def chat_rag(request: ChatRequest):
         )
         embedding_vektor = hasil_vektor.tolist()
 
-        # 2. RETRIEVAL (Supabase pgvector)
+        # 2. RETRIEVAL
         response = supabase.rpc("match_documents", {
             "query_embedding": embedding_vektor,
             "match_threshold": 0.65,
@@ -62,33 +62,56 @@ async def chat_rag(request: ChatRequest):
         }).execute()
 
         dokumen_ditemukan = response.data
-        konteks_gabungan = "\n\n".join([doc.get("content", "") for doc in dokumen_ditemukan])
         
-        if not konteks_gabungan.strip():
-            konteks_gabungan = "Tidak ada informasi terkait di dalam database."
+        # Menyusun konteks sekaligus mencari tahu KATEGORI UTAMA
+        konteks_list = []
+        kategori_utama = "umum" # Default persona
+        
+        if dokumen_ditemukan:
+            # Mengambil kategori dari dokumen yang paling relevan (urutan pertama)
+            kategori_utama = dokumen_ditemukan[0].get("kategori", "umum")
+            
+            for doc in dokumen_ditemukan:
+                kategori_doc = doc.get("kategori", "umum")
+                isi_doc = doc.get("content", "")
+                konteks_list.append(f"[Kategori: {kategori_doc}]\n{isi_doc}")
+            
+            konteks_gabungan = "\n\n".join(konteks_list)
+        else:
+            konteks_gabungan = "[TIDAK ADA KONTEKS SPESIFIK DARI DATABASE UNTUK PERTANYAAN INI]"
 
-        # 3. GENERATION DENGAN FALLBACK (Gemini -> Llama -> Qwen)
+        # --- DYNAMIC PERSONA MAPPING ---
+        persona_mapping = {
+            "mitigasi": "seorang ahli mitigasi iklim yang tegas, tenang, dan sangat peduli pada keselamatan. Nada bicaramu serius namun menenangkan, memberikan instruksi protektif yang jelas dan mudah diikuti.",
+            "kesehatan": "seorang konsultan kesehatan cuaca yang penuh empati. Nada bicaramu sangat hangat dan peduli, fokus memberikan saran perawatan diri terbaik agar pengguna tetap sehat menghadapi cuaca.",
+            "aktivitas": "seorang pemandu aktivitas dan agrikultur yang energik dan bersemangat. Nada bicaramu antusias dan memotivasi, memberikan saran yang praktis untuk kegiatan di luar ruangan.",
+            "edukasi": "seorang ilmuwan cuaca yang cerdas dan sangat antusias. Nada bicaramu menginspirasi rasa ingin tahu, menjelaskan fenomena alam dengan bahasa yang menarik, layaknya sedang bercerita.",
+            "umum": "asisten ahli meteorologi yang ramah, santai, dan suportif."
+        }
+        
+        peran_spesifik = persona_mapping.get(kategori_utama, persona_mapping["umum"])
+
+        instruksi_persona = f"""Kamu adalah WAMchat, {peran_spesifik}
+
+ATURAN PENTING:
+1. JANGAN PERNAH menggunakan frasa kaku seperti 'berdasarkan teks', 'menurut database', 'berdasarkan informasi yang saya miliki', atau yang sejenisnya. Jawablah mengalir seolah pengetahuan itu murni dari pikiranmu.
+2. Gunakan referensi [Konteks Database] yang diberikan sebagai acuan fakta untuk menjawab.
+3. Jika [Konteks Database] menunjukkan TIDAK ADA KONTEKS atau pertanyaan melenceng jauh dari topik cuaca/alam, tetaplah jawab dengan sopan memakai pengetahuan umummu, TAPI berikan sedikit klarifikasi ramah dengan gaya personamu bahwa kamu asisten cuaca."""
+
+        # 3. GENERATION DENGAN FALLBACK
         jawaban_akhir = ""
+        system_message = {"role": "system", "content": instruksi_persona}
+        user_message = {"role": "user", "content": f"Konteks Database:\n{konteks_gabungan}\n\nPertanyaan User: {user_text}"}
 
-        # Pesan sistem universal untuk Llama dan Qwen
-        system_message = {
-            "role": "system", 
-            "content": "Kamu adalah WAMchat, asisten AI pintar. Jawab pertanyaan HANYA berdasarkan konteks yang diberikan. Jika jawaban tidak ada di konteks, katakan kamu tidak tahu dengan sopan. Jawabannya jangan ada kata seperti 'berdasarkan informasi yang saya miliki' atau 'menurut data yang tersedia'. Tapi jangan bilang kamu tidak tahu jika tidak ada di konteks, jawab saja dengan informasi yang tersedia tapi beri sedikit ralat dan klarifikasinya."
-        }
-        user_message = {
-            "role": "user", 
-            "content": f"Konteks Database:\n{konteks_gabungan}\n\nPertanyaan User: {user_text}"
-        }
-
-        # --- PERCOBAAN 1: GEMINI (Model Utama) ---
+        # --- PERCOBAAN 1: GEMINI ---
         try:
-            print("Mencoba generate jawaban dengan Gemini...")
+            print(f"Mencoba Gemini dengan persona: {kategori_utama.upper()}...")
             if not gemini_client:
                 raise Exception("Kunci API Gemini tidak tersedia")
 
             gemini_config = types.GenerateContentConfig(
-                system_instruction="Kamu adalah WAMchat, asisten AI pintar. Jawab pertanyaan HANYA berdasarkan konteks yang diberikan. Jika jawaban tidak ada di konteks, katakan kamu tidak tahu dengan sopan. Jawabannya jangan ada kata seperti 'berdasarkan informasi yang saya miliki' atau 'menurut data yang tersedia'. Tapi jangan bilang kamu tidak tahu jika tidak ada di konteks, jawab saja dengan informasi yang tersedia tapi beri sedikit ralat dan klarifikasinya.",
-                temperature=0.3,
+                system_instruction=instruksi_persona,
+                temperature=0.4, 
             )
             
             prompt = f"Konteks Database:\n{konteks_gabungan}\n\nPertanyaan User: {user_text}"
@@ -102,9 +125,9 @@ async def chat_rag(request: ChatRequest):
             print("Berhasil menggunakan Gemini!")
 
         except Exception as e_gemini:
-            print(f"Gemini gagal: {e_gemini}. Beralih ke cadangan 1 (Llama 3.1)...")
+            print(f"Gemini gagal: {e_gemini}. Beralih ke Llama 3.1...")
             
-            # --- PERCOBAAN 2: LLAMA 3.1 (via HF Router) ---
+            # --- PERCOBAAN 2: LLAMA 3.1 ---
             try:
                 if not hf_openai_client:
                     raise Exception("Client HF Router tidak tersedia")
@@ -112,36 +135,34 @@ async def chat_rag(request: ChatRequest):
                 respons_llama = hf_openai_client.chat.completions.create(
                     model="meta-llama/Llama-3.1-8B-Instruct:novita",
                     messages=[system_message, user_message],
-                    temperature=0.3
+                    temperature=0.4
                 )
                 jawaban_akhir = respons_llama.choices[0].message.content
                 print("Berhasil menggunakan Llama 3.1!")
 
             except Exception as e_llama:
-                print(f"Llama gagal: {e_llama}. Beralih ke cadangan 2 (Qwen 2.5)...")
+                print(f"Llama gagal: {e_llama}. Beralih ke Qwen 2.5...")
                 
-                # --- PERCOBAAN 3: QWEN 2.5 (via HF Router) ---
+                # --- PERCOBAAN 3: QWEN 2.5 ---
                 try:
                     respons_qwen = hf_openai_client.chat.completions.create(
                         model="Qwen/Qwen2.5-1.5B-Instruct:featherless-ai",
                         messages=[system_message, user_message],
-                        temperature=0.3
+                        temperature=0.4
                     )
                     jawaban_akhir = respons_qwen.choices[0].message.content
                     print("Berhasil menggunakan Qwen 2.5!")
                     
                 except Exception as e_qwen:
                     print(f"Qwen juga gagal: {e_qwen}.")
-                    jawaban_akhir = "Maaf, semua sistem AI kami sedang mengalami gangguan. Mohon coba beberapa saat lagi."
+                    jawaban_akhir = "Waduh, sepertinya radar komunikasi saya sedang terganggu badai nih. Boleh coba kirim pesannya lagi sebentar lagi?"
 
         return {"reply": jawaban_akhir, "context_used": dokumen_ditemukan}
 
     except Exception as e:
-        # Ini akan memaksa error muncul di 'Deploy Logs' Railway
         print("--- DEBUG ERROR START ---")
         import traceback
         traceback.print_exc() 
         print(f"ERROR MESSAGE: {str(e)}")
         print("--- DEBUG ERROR END ---")
-        
         raise HTTPException(status_code=500, detail=str(e))
