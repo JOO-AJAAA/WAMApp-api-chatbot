@@ -96,9 +96,9 @@ async def chat_rag(request: ChatRequest):
             "umum": "asisten ahli meteorologi yang ramah, santai, dan suportif."
         }
         
-        peran_spesifik = persona_mapping.get(kategori_utama, persona_mapping["umum"])
+        peran_spesifik = persona_mapping.get(kategori_utama, persona_mapping["edukasi"])
 
-        instruksi_persona = f"""Kamu adalah WAMchat, {peran_spesifik}
+        instruksi_persona = f"""Kamu adalah WAMchat, kamu berada dalam aplikasi yang disebut dengan WAMApp data cuaca user berasal dari situ {peran_spesifik}
 
 ATURAN PENTING:
 1. JANGAN PERNAH menggunakan frasa kaku seperti 'berdasarkan teks', 'menurut database', 'berdasarkan informasi yang saya miliki', atau yang sejenisnya. Jawablah mengalir seolah pengetahuan itu murni dari pikiranmu.
