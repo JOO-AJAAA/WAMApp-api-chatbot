@@ -3,6 +3,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from supabase import create_client, Client
 from huggingface_hub import InferenceClient
+
+from typing import Optional, Any, Dict
+import json
 from openai import OpenAI
 from google import genai
 from google.genai import types
@@ -40,6 +43,10 @@ else:
 
 class ChatRequest(BaseModel):
     message: str
+
+    weather: Optional[Dict[str, Any]] = None
+    system_instructions: Optional[str] = None
+    assistant_instructions: Optional[str] = None
 
 @app.post("/api/chat")
 async def chat_rag(request: ChatRequest):
@@ -98,10 +105,36 @@ ATURAN PENTING:
 2. Gunakan referensi [Konteks Database] yang diberikan sebagai acuan fakta untuk menjawab.
 3. Jika [Konteks Database] menunjukkan TIDAK ADA KONTEKS atau pertanyaan melenceng jauh dari topik cuaca/alam, tetaplah jawab dengan sopan memakai pengetahuan umummu, TAPI berikan sedikit klarifikasi ramah dengan gaya personamu bahwa kamu asisten cuaca."""
 
+        # 3. GENERATION DENGAN FALLBACK       
+        # Merge incoming system/assistant prompts (if provided) and include weather snapshot
+        additional_system = ""
+        if request.system_instructions:
+            additional_system += "\n\n" + request.system_instructions
+        if request.assistant_instructions:
+            # assistant_instructions are treated as additional system guidance
+            additional_system += "\n\n" + request.assistant_instructions
+
+        combined_system_instruction = instruksi_persona + additional_system
+
         # 3. GENERATION DENGAN FALLBACK
         jawaban_akhir = ""
-        system_message = {"role": "system", "content": instruksi_persona}
-        user_message = {"role": "user", "content": f"Konteks Database:\n{konteks_gabungan}\n\nPertanyaan User: {user_text}"}
+        system_message = {"role": "system", "content": combined_system_instruction}
+
+        # include weather snapshot in the user message if provided
+        weather_text = ""
+        if request.weather:
+            try:
+                weather_text = "External Weather Snapshot:\n" + json.dumps(request.weather, ensure_ascii=False)
+            except Exception:
+                weather_text = "External Weather Snapshot: (unserializable)"
+
+        user_message = {"role": "user", "content": f"{weather_text}\n\nKonteks Database:\n{konteks_gabungan}\n\nPertanyaan User: {user_text}"}
+
+                    # prompt = f"Konteks Database:\n{konteks_gabungan}\n\nPertanyaan User: {user_text}"
+        prompt = [
+                {"role": "system", "content": combined_system_instruction},
+                {"role": "user", "content": f"{weather_text}\n\nKonteks Database:\n{konteks_gabungan}\n\nPertanyaan User: {user_text}"}
+            ]
 
         # --- PERCOBAAN 1: GEMINI ---
         try:
@@ -114,7 +147,6 @@ ATURAN PENTING:
                 temperature=0.4, 
             )
             
-            prompt = f"Konteks Database:\n{konteks_gabungan}\n\nPertanyaan User: {user_text}"
             
             respons_gemini = gemini_client.models.generate_content(
                 model="gemini-2.5-flash",
