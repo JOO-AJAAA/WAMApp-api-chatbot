@@ -43,6 +43,7 @@ else:
 
 class ChatRequest(BaseModel):
     message: str
+    device_id: str
 
     weather: Optional[Dict[str, Any]] = None
     system_instructions: Optional[str] = None
@@ -50,8 +51,11 @@ class ChatRequest(BaseModel):
 
 @app.post("/api/chat")
 async def chat_rag(request: ChatRequest):
+    import json # Import di dalam fungsi agar aman tanpa mengubah bagian atas file
+    
     try:
         user_text = request.message
+        device_id = getattr(request, 'device_id', 'unknown_device') # Pastikan aman jika kosong
         
         # 1. EMBEDDING
         query_text = f"query: {user_text}"
@@ -59,6 +63,7 @@ async def chat_rag(request: ChatRequest):
             query_text,
             model="intfloat/multilingual-e5-large"
         )
+        # Menggunakan caramu yang benar untuk e5-large
         embedding_vektor = hasil_vektor.tolist()
 
         # 2. RETRIEVAL
@@ -98,43 +103,54 @@ async def chat_rag(request: ChatRequest):
         
         peran_spesifik = persona_mapping.get(kategori_utama, persona_mapping["edukasi"])
 
-        instruksi_persona = f"""Kamu adalah WAMchat, kamu berada dalam aplikasi yang disebut dengan WAMApp data cuaca user berasal dari situ {peran_spesifik}
+        instruksi_persona = f"""Kamu adalah WAMchat, kamu berada dalam aplikasi yang disebut dengan WAMApp data cuaca user berasal dari situ. Kamu adalah {peran_spesifik}
 
 ATURAN PENTING:
 1. JANGAN PERNAH menggunakan frasa kaku seperti 'berdasarkan teks', 'menurut database', 'berdasarkan informasi yang saya miliki', atau yang sejenisnya. Jawablah mengalir seolah pengetahuan itu murni dari pikiranmu.
 2. Gunakan referensi [Konteks Database] yang diberikan sebagai acuan fakta untuk menjawab.
 3. Jika [Konteks Database] menunjukkan TIDAK ADA KONTEKS atau pertanyaan melenceng jauh dari topik cuaca/alam, tetaplah jawab dengan sopan memakai pengetahuan umummu, TAPI berikan sedikit klarifikasi ramah dengan gaya personamu bahwa kamu asisten cuaca."""
 
-        # 3. GENERATION DENGAN FALLBACK       
         # Merge incoming system/assistant prompts (if provided) and include weather snapshot
         additional_system = ""
-        if request.system_instructions:
+        if getattr(request, 'system_instructions', None):
             additional_system += "\n\n" + request.system_instructions
-        if request.assistant_instructions:
+        if getattr(request, 'assistant_instructions', None):
             # assistant_instructions are treated as additional system guidance
             additional_system += "\n\n" + request.assistant_instructions
 
         combined_system_instruction = instruksi_persona + additional_system
 
-        # 3. GENERATION DENGAN FALLBACK
+        # --- MENGAMBIL RIWAYAT CHAT SEBELUMNYA ---
+        history_response = supabase.table("chat_history") \
+            .select("role, content") \
+            .eq("device_id", device_id) \
+            .order("created_at", desc=True) \
+            .limit(10) \
+            .execute()
+        
+        history_data = history_response.data[::-1] # Balik agar urut dari terlama ke terbaru
+        teks_history = ""
+        if history_data:
+            teks_history = "Riwayat Percakapan Sebelumnya:\n"
+            for h in history_data:
+                nama = "User" if h['role'] == 'user' else "WAMchat"
+                teks_history += f"{nama}: {h['content']}\n"
+            teks_history += "\n"
+
+        # --- MENYUSUN KONTEN PENGGUNA ---
+        weather_text = ""
+        if getattr(request, 'weather', None):
+            try:
+                weather_text = "External Weather Snapshot:\n" + json.dumps(request.weather, ensure_ascii=False) + "\n\n"
+            except Exception:
+                weather_text = "External Weather Snapshot: (unserializable)\n\n"
+
+        # Gabungkan Riwayat + Cuaca + Konteks + Pertanyaan
+        user_content_lengkap = f"{teks_history}{weather_text}Konteks Database:\n{konteks_gabungan}\n\nPertanyaan User: {user_text}"
+
         jawaban_akhir = ""
         system_message = {"role": "system", "content": combined_system_instruction}
-
-        # include weather snapshot in the user message if provided
-        weather_text = ""
-        if request.weather:
-            try:
-                weather_text = "External Weather Snapshot:\n" + json.dumps(request.weather, ensure_ascii=False)
-            except Exception:
-                weather_text = "External Weather Snapshot: (unserializable)"
-
-        user_message = {"role": "user", "content": f"{weather_text}\n\nKonteks Database:\n{konteks_gabungan}\n\nPertanyaan User: {user_text}"}
-
-                    # prompt = f"Konteks Database:\n{konteks_gabungan}\n\nPertanyaan User: {user_text}"
-        prompt = [
-                {"role": "system", "content": combined_system_instruction},
-                {"role": "user", "content": f"{weather_text}\n\nKonteks Database:\n{konteks_gabungan}\n\nPertanyaan User: {user_text}"}
-            ]
+        user_message = {"role": "user", "content": user_content_lengkap}
 
         # --- PERCOBAAN 1: GEMINI ---
         try:
@@ -142,15 +158,16 @@ ATURAN PENTING:
             if not gemini_client:
                 raise Exception("Kunci API Gemini tidak tersedia")
 
+            # Konfigurasi system prompt
             gemini_config = types.GenerateContentConfig(
-                system_instruction=instruksi_persona,
+                system_instruction=combined_system_instruction,
                 temperature=0.4, 
             )
             
-            
+            # PENTING: Pakai model gemini-2.5-flash agar stabil
             respons_gemini = gemini_client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=prompt,
+                contents=user_content_lengkap, 
                 config=gemini_config
             )
             jawaban_akhir = respons_gemini.text
@@ -189,6 +206,13 @@ ATURAN PENTING:
                     print(f"Qwen juga gagal: {e_qwen}.")
                     jawaban_akhir = "Waduh, sepertinya radar komunikasi saya sedang terganggu badai nih. Boleh coba kirim pesannya lagi sebentar lagi?"
 
+        # --- SIMPAN KE DATABASE SETELAH AI MENJAWAB ---
+        if jawaban_akhir and not jawaban_akhir.startswith("Waduh, sepertinya"):
+            supabase.table("chat_history").insert([
+                {"device_id": device_id, "role": "user", "content": user_text},
+                {"device_id": device_id, "role": "bot", "content": jawaban_akhir}
+            ]).execute()
+
         return {"reply": jawaban_akhir, "context_used": dokumen_ditemukan}
 
     except Exception as e:
@@ -197,4 +221,5 @@ ATURAN PENTING:
         traceback.print_exc() 
         print(f"ERROR MESSAGE: {str(e)}")
         print("--- DEBUG ERROR END ---")
+        
         raise HTTPException(status_code=500, detail=str(e))
