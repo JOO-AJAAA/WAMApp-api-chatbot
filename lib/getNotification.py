@@ -1,21 +1,83 @@
+import json
 import os
-from typing import List, Optional, Dict, Any
-from supabase import create_client
+from typing import Any, Dict, List, Optional
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from uuid import UUID
 
+from dotenv import load_dotenv
+
+
+load_dotenv()
 SUPABASE_URL = os.getenv("EXPO_SUPABASE_URL")
 SUPABASE_KEY = os.getenv("EXPO_SUPABASE_ANON_KEY")
 
 
-def _get_supabase_client():
-	"""Create a Supabase client using the service key from env.
+class DeviceIdUnavailableError(RuntimeError):
+	pass
 
-	Returns:
-		supabase.Client: configured client
-	"""
+
+class NotificationFetchError(RuntimeError):
+	pass
+
+
+def _normalize_device_id(device_id: Optional[str]) -> str:
+	cleaned = (device_id or "").strip()
+	if not cleaned:
+		raise DeviceIdUnavailableError("device_id is required for notifications RLS policy")
+
+	try:
+		return str(UUID(cleaned))
+	except ValueError as exc:
+		raise DeviceIdUnavailableError("device_id is invalid for notifications RLS policy") from exc
+
+
+def _build_notifications_url(normalized_device_id: str, limit: int, since_iso: Optional[str]) -> str:
 	if not SUPABASE_URL or not SUPABASE_KEY:
-		raise RuntimeError("EXPO Supabase URL or ANON KEY is not configured in environment")
+		raise NotificationFetchError("EXPO Supabase URL or ANON KEY is not configured in environment")
 
-	return create_client(SUPABASE_URL, SUPABASE_KEY)
+	base_url = SUPABASE_URL.rstrip("/")
+	query_params = [
+		("select", "id,device_id,title,message,category,data,is_read,created_at"),
+		("device_id", f"eq.{normalized_device_id}"),
+		("order", "created_at.desc"),
+		("limit", str(limit)),
+	]
+
+	if since_iso:
+		query_params.append(("created_at", f"gte.{since_iso}"))
+
+	return f"{base_url}/rest/v1/notifications?{urlencode(query_params)}"
+
+
+def _fetch_notifications(normalized_device_id: str, limit: int, since_iso: Optional[str]) -> List[Dict[str, Any]]:
+	url = _build_notifications_url(normalized_device_id, limit, since_iso)
+	headers = {
+		"apikey": SUPABASE_KEY or "",
+		"Authorization": f"Bearer {SUPABASE_KEY or ''}",
+		"Accept": "application/json",
+		"Content-Type": "application/json",
+		"x-device-id": normalized_device_id,
+		"device_id": normalized_device_id,
+	}
+
+	request = Request(url, headers=headers, method="GET")
+
+	try:
+		with urlopen(request, timeout=20) as response:
+			payload = response.read().decode("utf-8")
+			data = json.loads(payload) if payload else []
+			if not isinstance(data, list):
+				raise NotificationFetchError("Supabase response is not a list")
+			return data
+	except HTTPError as exc:
+		detail = exc.read().decode("utf-8", errors="ignore") if hasattr(exc, "read") else str(exc)
+		raise NotificationFetchError(f"Supabase HTTP error: {exc.code} {detail}") from exc
+	except URLError as exc:
+		raise NotificationFetchError(f"Supabase connection error: {exc.reason}") from exc
+	except json.JSONDecodeError as exc:
+		raise NotificationFetchError(f"Invalid JSON response from Supabase: {exc}") from exc
 
 
 def get_notifications_for_device(device_id: str, limit: int = 100, since_iso: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -30,37 +92,8 @@ def get_notifications_for_device(device_id: str, limit: int = 100, since_iso: Op
 		List of notification records (dictionaries) ordered by created_at descending.
 
 	Raises:
-		RuntimeError if the query fails or env not configured.
+		DeviceIdUnavailableError if device_id is missing/invalid.
+		NotificationFetchError if the query fails or env not configured.
 	"""
-	client = _get_supabase_client()
-
-	try:
-		query = client.table('notifications').select('id, device_id, title, message, category, data, is_read, created_at')
-		query = query.eq('device_id', device_id)
-		if since_iso:
-			# Supabase/python client supports gte filter
-			query = query.gte('created_at', since_iso)
-
-		query = query.order('created_at', desc=True).limit(limit)
-
-		response = query.execute()
-
-		# The client returns a dict-like response with 'data' and 'error'
-		if hasattr(response, 'error') and response.error:
-			raise RuntimeError(f"Supabase query error: {response.error}")
-
-		# Some client versions return a dict
-		data = None
-		if isinstance(response, dict):
-			data = response.get('data')
-			error = response.get('error')
-			if error:
-				raise RuntimeError(f"Supabase query error: {error}")
-		else:
-			# response may be a custom object with .data attribute
-			data = getattr(response, 'data', None)
-
-		return data or []
-
-	except Exception as exc:
-		raise RuntimeError(f"Failed to fetch notifications: {exc}") from exc
+	normalized_device_id = _normalize_device_id(device_id)
+	return _fetch_notifications(normalized_device_id, limit, since_iso)
