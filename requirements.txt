@@ -7,3 +7,4 @@ openai
 google-genai
 python-dotenv
 numpy
+PyJWT

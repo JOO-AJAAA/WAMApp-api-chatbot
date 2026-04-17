@@ -1,10 +1,13 @@
 import os
-from fastapi import FastAPI, HTTPException
+import time
+from datetime import datetime, timedelta, timezone
+from fastapi import FastAPI, HTTPException, Header, Request
 from pydantic import BaseModel
 from supabase import create_client, Client
 from huggingface_hub import InferenceClient
+import jwt
 
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, List
 import json
 from openai import OpenAI
 from google import genai
@@ -13,6 +16,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 app = FastAPI()
+
+# --- AUTH & RATE LIMIT CONFIG ---
+JWT_SECRET = os.getenv("JWT_SECRET", "")
+JWT_ALGORITHM = "HS256"
+JWT_ISSUER = "wamapp-api"
+JWT_AUDIENCE = "wamapp-mobile"
+JWT_EXPIRE_SECONDS = int(os.getenv("JWT_EXPIRE_SECONDS", "600"))
+WAMAPP_CLIENT_KEY = os.getenv("WAMAPP_CLIENT_KEY", "")
+
+CHAT_RATE_LIMIT_REQUESTS = int(os.getenv("CHAT_RATE_LIMIT_REQUESTS", "25"))
+CHAT_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("CHAT_RATE_LIMIT_WINDOW_SECONDS", "60"))
+_chat_rate_bucket: Dict[str, List[float]] = {}
 
 # --- SETUP SUPABASE ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -49,13 +64,120 @@ class ChatRequest(BaseModel):
     system_instructions: Optional[str] = None
     assistant_instructions: Optional[str] = None
 
+
+class ChatTokenRequest(BaseModel):
+    device_id: str
+
+
+def _get_client_ip(req: Request) -> str:
+    xff = req.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    if req.client and req.client.host:
+        return req.client.host
+    return "unknown_ip"
+
+
+def _enforce_rate_limit(device_id: str, ip: str) -> None:
+    now = time.time()
+    key = f"{device_id}:{ip}"
+    window_start = now - CHAT_RATE_LIMIT_WINDOW_SECONDS
+
+    timestamps = _chat_rate_bucket.get(key, [])
+    timestamps = [ts for ts in timestamps if ts > window_start]
+
+    if len(timestamps) >= CHAT_RATE_LIMIT_REQUESTS:
+        raise HTTPException(status_code=429, detail="Terlalu banyak request. Coba lagi sebentar.")
+
+    timestamps.append(now)
+    _chat_rate_bucket[key] = timestamps
+
+
+def _create_chat_access_token(device_id: str) -> str:
+    if not JWT_SECRET:
+        raise HTTPException(status_code=500, detail="JWT_SECRET belum dikonfigurasi di server.")
+
+    now = datetime.now(timezone.utc)
+    exp = now + timedelta(seconds=JWT_EXPIRE_SECONDS)
+
+    payload = {
+        "sub": device_id,
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
+        "iat": int(now.timestamp()),
+        "exp": int(exp.timestamp()),
+    }
+
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _verify_chat_access_token(authorization: Optional[str]) -> Dict[str, Any]:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Token tidak ditemukan.")
+
+    parts = authorization.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Format Authorization harus Bearer token.")
+
+    token = parts[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Token kosong.")
+
+    try:
+        decoded = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=[JWT_ALGORITHM],
+            audience=JWT_AUDIENCE,
+            issuer=JWT_ISSUER,
+        )
+        return decoded
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Token tidak valid.")
+
+
+@app.post("/api/chat/token")
+async def issue_chat_token(
+    request: ChatTokenRequest,
+    x_wamapp_client_key: Optional[str] = Header(default=None),
+):
+    if not WAMAPP_CLIENT_KEY:
+        raise HTTPException(status_code=500, detail="WAMAPP_CLIENT_KEY belum dikonfigurasi di server.")
+
+    if not x_wamapp_client_key or x_wamapp_client_key != WAMAPP_CLIENT_KEY:
+        raise HTTPException(status_code=403, detail="Akses ditolak.")
+
+    if not request.device_id or not request.device_id.strip():
+        raise HTTPException(status_code=400, detail="device_id wajib diisi.")
+
+    token = _create_chat_access_token(request.device_id.strip())
+    return {
+        "token": token,
+        "token_type": "Bearer",
+        "expires_in": JWT_EXPIRE_SECONDS,
+    }
+
 @app.post("/api/chat")
-async def chat_rag(request: ChatRequest):
+async def chat_rag(
+    request: ChatRequest,
+    http_request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
     import json # Import di dalam fungsi agar aman tanpa mengubah bagian atas file
     
     try:
         user_text = request.message
         device_id = getattr(request, 'device_id', 'unknown_device') # Pastikan aman jika kosong
+
+        token_payload = _verify_chat_access_token(authorization)
+        token_device_id = str(token_payload.get("sub", "")).strip()
+        if not token_device_id or token_device_id != device_id:
+            raise HTTPException(status_code=403, detail="Token tidak cocok dengan device_id.")
+
+        client_ip = _get_client_ip(http_request)
+        _enforce_rate_limit(device_id=device_id, ip=client_ip)
         
         # 1. EMBEDDING
         query_text = f"query: {user_text}"
