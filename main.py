@@ -30,14 +30,24 @@ CHAT_RATE_LIMIT_REQUESTS = int(os.getenv("CHAT_RATE_LIMIT_REQUESTS", "25"))
 CHAT_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("CHAT_RATE_LIMIT_WINDOW_SECONDS", "60"))
 _chat_rate_bucket: Dict[str, List[float]] = {}
 DEVICE_ID_VALIDATION_TABLES = [
-    t.strip() for t in os.getenv("DEVICE_ID_VALIDATION_TABLES", "devices,notifications").split(",") if t.strip()
+    t.strip() for t in os.getenv("DEVICE_ID_VALIDATION_TABLES", "devices,notifications,marked_locations").split(",") if t.strip()
 ]
 DEVICE_ID_VALIDATION_COLUMN = os.getenv("DEVICE_ID_VALIDATION_COLUMN", "device_id")
 
 # --- SETUP SUPABASE ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+EXPO_SUPABASE_URL = os.getenv("EXPO_SUPABASE_URL")
+EXPO_SUPABASE_KEY = os.getenv("EXPO_SUPABASE_ANON_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_URL or SUPABASE_KEY is not configured in environment")
+
+if not EXPO_SUPABASE_URL or not EXPO_SUPABASE_KEY:
+    raise RuntimeError("EXPO_SUPABASE_URL or EXPO_SUPABASE_ANON_KEY is not configured in environment")
+
+backend_supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+expo_supabase: Client = create_client(EXPO_SUPABASE_URL, EXPO_SUPABASE_KEY)
 
 # --- SETUP HUGGING FACE (Untuk Embedding) ---
 hf_token = os.getenv("HF_TOKEN")
@@ -114,7 +124,7 @@ def _is_registered_device_id(device_id: str) -> bool:
     for table_name in DEVICE_ID_VALIDATION_TABLES:
         try:
             response = (
-                supabase.table(table_name)
+                expo_supabase.table(table_name)
                 .select(DEVICE_ID_VALIDATION_COLUMN)
                 .eq(DEVICE_ID_VALIDATION_COLUMN, device_id)
                 .limit(1)
@@ -229,7 +239,7 @@ async def chat_rag(
         embedding_vektor = hasil_vektor.tolist()
 
         # 2. RETRIEVAL
-        response = supabase.rpc("match_documents", {
+        response = backend_supabase.rpc("match_documents", {
             "query_embedding": embedding_vektor,
             "match_threshold": 0.65,
             "match_count": 4
@@ -283,7 +293,7 @@ ATURAN PENTING:
         combined_system_instruction = instruksi_persona + additional_system
 
         # --- MENGAMBIL RIWAYAT CHAT SEBELUMNYA ---
-        history_response = supabase.table("chat_history") \
+        history_response = backend_supabase.table("chat_history") \
             .select("role, content") \
             .eq("device_id", device_id) \
             .order("created_at", desc=True) \
@@ -370,7 +380,7 @@ ATURAN PENTING:
 
         # --- SIMPAN KE DATABASE SETELAH AI MENJAWAB ---
         if jawaban_akhir and not jawaban_akhir.startswith("Waduh, sepertinya"):
-            supabase.table("chat_history").insert([
+            backend_supabase.table("chat_history").insert([
                 {"device_id": device_id, "role": "user", "content": user_text},
                 {"device_id": device_id, "role": "bot", "content": jawaban_akhir}
             ]).execute()

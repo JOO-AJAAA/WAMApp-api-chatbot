@@ -3,7 +3,7 @@ from typing import List, Optional, Dict, Any
 from supabase import create_client
 
 SUPABASE_URL = os.getenv("EXPO_SUPABASE_URL")
-SUPABASE_KEY = os.getenv("EXPO_SUPABASE_SECRET_KEY")
+SUPABASE_KEY = os.getenv("EXPO_SUPABASE_ANON_KEY")
 
 
 def _get_supabase_client():
@@ -13,7 +13,7 @@ def _get_supabase_client():
 		supabase.Client: configured client
 	"""
 	if not SUPABASE_URL or not SUPABASE_KEY:
-		raise RuntimeError("Supabase URL or SECRET KEY is not configured in environment")
+		raise RuntimeError("EXPO Supabase URL or ANON KEY is not configured in environment")
 
 	return create_client(SUPABASE_URL, SUPABASE_KEY)
 
