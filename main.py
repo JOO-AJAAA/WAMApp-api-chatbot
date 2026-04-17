@@ -30,7 +30,7 @@ CHAT_RATE_LIMIT_REQUESTS = int(os.getenv("CHAT_RATE_LIMIT_REQUESTS", "25"))
 CHAT_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("CHAT_RATE_LIMIT_WINDOW_SECONDS", "60"))
 _chat_rate_bucket: Dict[str, List[float]] = {}
 DEVICE_ID_VALIDATION_TABLES = [
-    t.strip() for t in os.getenv("DEVICE_ID_VALIDATION_TABLES", "devices,notifications").split(",") if t.strip()
+    t.strip() for t in os.getenv("DEVICE_ID_VALIDATION_TABLES", "chat_history").split(",") if t.strip()
 ]
 DEVICE_ID_VALIDATION_COLUMN = os.getenv("DEVICE_ID_VALIDATION_COLUMN", "device_id")
 
@@ -131,6 +131,7 @@ def _is_registered_device_id(device_id: str) -> bool:
 
 def _assert_registered_device_id(device_id: str) -> str:
     normalized_device_id = _normalize_device_id(device_id)
+    print(f"Memvalidasi device_id: {normalized_device_id}")
     if not _is_registered_device_id(normalized_device_id):
         raise HTTPException(status_code=403, detail="device_id tidak terdaftar.")
     return normalized_device_id
@@ -383,5 +384,8 @@ ATURAN PENTING:
         traceback.print_exc() 
         print(f"ERROR MESSAGE: {str(e)}")
         print("--- DEBUG ERROR END ---")
-        
+
+        if isinstance(e, HTTPException):
+            raise e
+
         raise HTTPException(status_code=500, detail=str(e))
