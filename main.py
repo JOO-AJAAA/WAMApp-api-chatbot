@@ -1,5 +1,6 @@
 import os
 import time
+from uuid import UUID
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, HTTPException, Header, Request
 from pydantic import BaseModel
@@ -28,6 +29,10 @@ WAMAPP_CLIENT_KEY = os.getenv("WAMAPP_CLIENT_KEY", "")
 CHAT_RATE_LIMIT_REQUESTS = int(os.getenv("CHAT_RATE_LIMIT_REQUESTS", "25"))
 CHAT_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("CHAT_RATE_LIMIT_WINDOW_SECONDS", "60"))
 _chat_rate_bucket: Dict[str, List[float]] = {}
+DEVICE_ID_VALIDATION_TABLES = [
+    t.strip() for t in os.getenv("DEVICE_ID_VALIDATION_TABLES", "devices,notifications").split(",") if t.strip()
+]
+DEVICE_ID_VALIDATION_COLUMN = os.getenv("DEVICE_ID_VALIDATION_COLUMN", "device_id")
 
 # --- SETUP SUPABASE ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -93,6 +98,44 @@ def _enforce_rate_limit(device_id: str, ip: str) -> None:
     _chat_rate_bucket[key] = timestamps
 
 
+def _normalize_device_id(device_id: str) -> str:
+    cleaned = (device_id or "").strip()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="device_id wajib diisi.")
+
+    try:
+        # Paksa format UUID agar tidak menerima device_id random.
+        return str(UUID(cleaned))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Format device_id tidak valid.")
+
+
+def _is_registered_device_id(device_id: str) -> bool:
+    for table_name in DEVICE_ID_VALIDATION_TABLES:
+        try:
+            response = (
+                supabase.table(table_name)
+                .select(DEVICE_ID_VALIDATION_COLUMN)
+                .eq(DEVICE_ID_VALIDATION_COLUMN, device_id)
+                .limit(1)
+                .execute()
+            )
+            rows = response.data if hasattr(response, "data") else response.get("data", [])
+            if rows:
+                return True
+        except Exception as exc:
+            print(f"WARNING: Validasi device_id ke tabel '{table_name}' gagal: {exc}")
+
+    return False
+
+
+def _assert_registered_device_id(device_id: str) -> str:
+    normalized_device_id = _normalize_device_id(device_id)
+    if not _is_registered_device_id(normalized_device_id):
+        raise HTTPException(status_code=403, detail="device_id tidak terdaftar.")
+    return normalized_device_id
+
+
 def _create_chat_access_token(device_id: str) -> str:
     if not JWT_SECRET:
         raise HTTPException(status_code=500, detail="JWT_SECRET belum dikonfigurasi di server.")
@@ -149,10 +192,9 @@ async def issue_chat_token(
     if not x_wamapp_client_key or x_wamapp_client_key != WAMAPP_CLIENT_KEY:
         raise HTTPException(status_code=403, detail="Akses ditolak.")
 
-    if not request.device_id or not request.device_id.strip():
-        raise HTTPException(status_code=400, detail="device_id wajib diisi.")
+    device_id = _assert_registered_device_id(request.device_id)
 
-    token = _create_chat_access_token(request.device_id.strip())
+    token = _create_chat_access_token(device_id)
     return {
         "token": token,
         "token_type": "Bearer",
@@ -165,11 +207,9 @@ async def chat_rag(
     http_request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    import json # Import di dalam fungsi agar aman tanpa mengubah bagian atas file
-    
     try:
         user_text = request.message
-        device_id = getattr(request, 'device_id', 'unknown_device') # Pastikan aman jika kosong
+        device_id = _assert_registered_device_id(request.device_id)
 
         token_payload = _verify_chat_access_token(authorization)
         token_device_id = str(token_payload.get("sub", "")).strip()
