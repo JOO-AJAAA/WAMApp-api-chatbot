@@ -32,16 +32,19 @@ WAMAPP_CLIENT_KEY = os.getenv("WAMAPP_CLIENT_KEY", "")
 
 CHAT_RATE_LIMIT_REQUESTS = int(os.getenv("CHAT_RATE_LIMIT_REQUESTS", "25"))
 CHAT_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("CHAT_RATE_LIMIT_WINDOW_SECONDS", "60"))
-_chat_rate_bucket: Dict[str, List[float]] = {}
 
 # --- SETUP SUPABASE ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
+EXPO_SUPABASE_URL = os.getenv("EXPO_SUPABASE_URL")
+EXPO_SUPABASE_KEY = os.getenv("EXPO_SUPABASE_ANON_KEY")
+
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_URL or SUPABASE_KEY is not configured in environment")
 
 backend_supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+expo_backend: Client = create_client(EXPO_SUPABASE_URL, EXPO_SUPABASE_KEY)
 
 # --- SETUP HUGGING FACE (Untuk Embedding) ---
 hf_token = os.getenv("HF_TOKEN")
@@ -160,6 +163,19 @@ async def chat_rag(
             .order("created_at", desc=True) \
             .limit(10) \
             .execute()
+            
+        device_check_response = (
+            expo_backend.table("device")
+            .select("id", count="exact")
+            .eq("id", device_id)
+            .limit(1)
+            .execute()
+        )
+        device_row_count = device_check_response.count or 0
+        
+        if(device_row_count == 0):
+            print(f"Device ID {device_id} tidak ditemukan di database Expo Supabase. Riwayat notifikasi tidak akan diambil.")
+            notifications = []
         
         history_data = history_response.data[::-1] # Balik agar urut dari terlama ke terbaru
         try:
