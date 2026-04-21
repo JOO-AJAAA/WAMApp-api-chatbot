@@ -26,7 +26,7 @@ def enforce_rate_limit(device_id: str, ip: str, max_requests: int, window_second
     timestamps = [ts for ts in timestamps if ts > window_start]
 
     if len(timestamps) >= max_requests:
-        raise HTTPException(status_code=429, detail="Terlalu banyak request. Coba lagi sebentar.")
+        raise HTTPException(status_code=429, detail="Too many requests. Please try again shortly.")
 
     timestamps.append(now)
     _CHAT_RATE_BUCKET[key] = timestamps
@@ -41,7 +41,7 @@ def create_chat_access_token(
     jwt_algorithm: str = "HS256",
 ) -> str:
     if not jwt_secret:
-        raise HTTPException(status_code=500, detail="JWT_SECRET belum dikonfigurasi di server.")
+        raise HTTPException(status_code=500, detail="JWT_SECRET is not configured on the server.")
 
     now = datetime.now(timezone.utc)
     exp = now + timedelta(seconds=jwt_expire_seconds)
@@ -65,18 +65,18 @@ def verify_chat_access_token(
     jwt_algorithm: str = "HS256",
 ) -> Dict[str, Any]:
     if not authorization:
-        raise HTTPException(status_code=401, detail="Token tidak ditemukan.")
+        raise HTTPException(status_code=401, detail="Token not found.")
 
     parts = authorization.split(" ", 1)
     if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Format Authorization harus Bearer token.")
+        raise HTTPException(status_code=401, detail="Authorization must use the Bearer token format.")
 
     token = parts[1].strip()
     if not token:
-        raise HTTPException(status_code=401, detail="Token kosong.")
+        raise HTTPException(status_code=401, detail="Token is empty.")
 
     if not jwt_secret:
-        raise HTTPException(status_code=500, detail="JWT_SECRET belum dikonfigurasi di server.")
+        raise HTTPException(status_code=500, detail="JWT_SECRET is not configured on the server.")
 
     try:
         decoded = jwt.decode(
@@ -90,4 +90,4 @@ def verify_chat_access_token(
     except jwt.ExpiredSignatureError as exc:
         raise HTTPException(status_code=401, detail="Token expired.") from exc
     except jwt.InvalidTokenError as exc:
-        raise HTTPException(status_code=401, detail="Token tidak valid.") from exc
+        raise HTTPException(status_code=401, detail="Token is invalid.") from exc

@@ -46,26 +46,26 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 backend_supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 expo_backend: Client = create_client(EXPO_SUPABASE_URL, EXPO_SUPABASE_KEY)
 
-# --- SETUP HUGGING FACE (Untuk Embedding) ---
+# --- HUGGING FACE SETUP (For Embeddings) ---
 hf_token = os.getenv("HF_TOKEN")
 hf_client = InferenceClient(provider="hf-inference", api_key=hf_token)
 
-# --- SETUP HUGGING FACE ROUTER (Untuk Llama & Qwen via OpenAI SDK) ---
+# --- HUGGING FACE ROUTER SETUP (For Llama & Qwen via OpenAI SDK) ---
 if hf_token:
     hf_openai_client = OpenAI(
         base_url="https://router.huggingface.co/v1",
         api_key=hf_token,
     )
 else:
-    print("WARNING: HF_TOKEN belum diset!")
+    print("WARNING: HF_TOKEN is not set yet!")
     hf_openai_client = None
 
-# --- SETUP GEMINI (Utama) ---
+# --- GEMINI SETUP (Primary) ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 else:
-    print("WARNING: GEMINI_API_KEY belum diset!")
+    print("WARNING: GEMINI_API_KEY is not set yet!")
     gemini_client = None
 
 class ChatRequest(BaseModel):
@@ -88,15 +88,16 @@ async def issue_chat_token(
     request: ChatTokenRequest,
     x_wamapp_client_key: Optional[str] = Header(default=None),
 ):
+
     if not WAMAPP_CLIENT_KEY:
-        raise HTTPException(status_code=500, detail="WAMAPP_CLIENT_KEY belum dikonfigurasi di server.")
+        raise HTTPException(status_code=500, detail="WAMAPP_CLIENT_KEY is not configured on the server.")
 
     if not x_wamapp_client_key or x_wamapp_client_key != WAMAPP_CLIENT_KEY:
-        raise HTTPException(status_code=403, detail="Akses ditolak.")
+        raise HTTPException(status_code=403, detail="Access denied.")
 
     device_id = (request.device_id or "").strip()
     if not device_id:
-        raise HTTPException(status_code=400, detail="device_id wajib diisi.")
+        raise HTTPException(status_code=400, detail="device_id is required.")
 
     token = create_chat_access_token(
         device_id,
@@ -122,7 +123,7 @@ async def chat_rag(
         user_text = request.message
         device_id = (request.device_id or "").strip()
         if not device_id:
-            raise HTTPException(status_code=400, detail="device_id wajib diisi.")
+            raise HTTPException(status_code=400, detail="device_id is required.")
 
         token_payload = verify_chat_access_token(
             authorization,
@@ -133,7 +134,7 @@ async def chat_rag(
         )
         token_device_id = str(token_payload.get("sub", "")).strip()
         if not token_device_id or token_device_id != device_id:
-            raise HTTPException(status_code=403, detail="Token tidak cocok dengan device_id.")
+            raise HTTPException(status_code=403, detail="Token does not match the device_id.")
 
         client_ip = get_client_ip(http_request)
         enforce_rate_limit(device_id=device_id, ip=client_ip, max_requests=CHAT_RATE_LIMIT_REQUESTS, window_seconds=CHAT_RATE_LIMIT_WINDOW_SECONDS)
@@ -144,7 +145,7 @@ async def chat_rag(
             query_text,
             model="intfloat/multilingual-e5-large"
         )
-        # Menggunakan caramu yang benar untuk e5-large
+        # Use the correct approach for e5-large
         embedding_vektor = hasil_vektor.tolist()
 
         # 2. RETRIEVAL
@@ -155,8 +156,7 @@ async def chat_rag(
         }).execute()
 
         dokumen_ditemukan = response.data
-        
-        # --- MENGAMBIL RIWAYAT CHAT SEBELUMNYA ---
+        # --- FETCH PREVIOUS CHAT HISTORY ---
         history_response = backend_supabase.table("chat_history") \
             .select("role, content") \
             .eq("device_id", device_id) \
@@ -164,31 +164,19 @@ async def chat_rag(
             .limit(10) \
             .execute()
             
-        device_check_response = (
-            expo_backend.table("device")
-            .select("id", count="exact")
-            .eq("id", device_id)
-            .limit(1)
-            .execute()
-        )
-        device_row_count = device_check_response.count or 0
         
-        if(device_row_count == 0):
-            print(f"Device ID {device_id} tidak ditemukan di database Expo Supabase. Riwayat notifikasi tidak akan diambil.")
-            notifications = []
-        
-        history_data = history_response.data[::-1] # Balik agar urut dari terlama ke terbaru
+        history_data = history_response.data[::-1] # Reverse to keep the order from oldest to newest
         try:
             notifications = get_notifications_for_device(device_id=device_id, limit=10)
         except DeviceIdUnavailableError as notif_device_err:
             raise HTTPException(
                 status_code=400,
-                detail="Gagal mengambil context notifikasi: device_id tidak tersedia/invalid.",
+                detail="Failed to retrieve notification context: device_id is unavailable/invalid.",
             ) from notif_device_err
         except NotificationFetchError as notif_fetch_err:
-            print(f"Warning: notifikasi gagal diambil, lanjut tanpa context notifikasi: {notif_fetch_err}")
+            print(f"Warning: notifications could not be fetched; continuing without notification context: {notif_fetch_err}")
             notifications = []
-        print("notification\n", notifications)
+        print("notifications\n", notifications)
                 
         context_bundle = build_llm_context(
             user_text=user_text,
@@ -209,34 +197,34 @@ async def chat_rag(
         system_message = context_bundle["system_message"]
         user_message = context_bundle["user_message"]
 
-        # --- PERCOBAAN 1: GEMINI ---
+        # --- ATTEMPT 1: GEMINI ---
         try:
-            print(f"Mencoba Gemini dengan persona: {context_bundle['kategori_utama'].upper()}...")
+            print(f"Trying Gemini with persona: {context_bundle['kategori_utama'].upper()}...")
             if not gemini_client:
-                raise Exception("Kunci API Gemini tidak tersedia")
+                raise Exception("Gemini API key is not available")
 
-            # Konfigurasi system prompt
+            # System prompt configuration
             gemini_config = types.GenerateContentConfig(
                 system_instruction=combined_system_instruction,
                 temperature=0.4, 
             )
             
-            # PENTING: Pakai model gemini-2.5-flash agar stabil
+            # IMPORTANT: Use gemini-2.5-flash for stability
             respons_gemini = gemini_client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=user_content_lengkap, 
                 config=gemini_config
             )
             jawaban_akhir = respons_gemini.text
-            print("Berhasil menggunakan Gemini!")
+            print("Gemini succeeded!")
 
         except Exception as e_gemini:
-            print(f"Gemini gagal: {e_gemini}. Beralih ke Llama 3.1...")
+            print(f"Gemini failed: {e_gemini}. Falling back to Llama 3.1...")
             
-            # --- PERCOBAAN 2: LLAMA 3.1 ---
+            # --- ATTEMPT 2: LLAMA 3.1 ---
             try:
                 if not hf_openai_client:
-                    raise Exception("Client HF Router tidak tersedia")
+                    raise Exception("HF Router client is not available")
 
                 respons_llama = hf_openai_client.chat.completions.create(
                     model="meta-llama/Llama-3.1-8B-Instruct:novita",
@@ -244,12 +232,12 @@ async def chat_rag(
                     temperature=0.4
                 )
                 jawaban_akhir = respons_llama.choices[0].message.content
-                print("Berhasil menggunakan Llama 3.1!")
+                print("Llama 3.1 succeeded!")
 
             except Exception as e_llama:
-                print(f"Llama gagal: {e_llama}. Beralih ke Qwen 2.5...")
+                print(f"Llama failed: {e_llama}. Falling back to Qwen 2.5...")
                 
-                # --- PERCOBAAN 3: QWEN 2.5 ---
+                # --- ATTEMPT 3: QWEN 2.5 ---
                 try:
                     respons_qwen = hf_openai_client.chat.completions.create(
                         model="Qwen/Qwen2.5-1.5B-Instruct:featherless-ai",
@@ -257,14 +245,14 @@ async def chat_rag(
                         temperature=0.4
                     )
                     jawaban_akhir = respons_qwen.choices[0].message.content
-                    print("Berhasil menggunakan Qwen 2.5!")
+                    print("Qwen 2.5 succeeded!")
                     
                 except Exception as e_qwen:
-                    print(f"Qwen juga gagal: {e_qwen}.")
-                    jawaban_akhir = "Waduh, sepertinya radar komunikasi saya sedang terganggu badai nih. Boleh coba kirim pesannya lagi sebentar lagi?"
+                    print(f"Qwen also failed: {e_qwen}.")
+                    jawaban_akhir = "Oops, it seems my communication radar is being disrupted by a storm. Could you try sending the message again in a moment?"
 
-        # --- SIMPAN KE DATABASE SETELAH AI MENJAWAB ---
-        if jawaban_akhir and not jawaban_akhir.startswith("Waduh, sepertinya"):
+        # --- SAVE TO DATABASE AFTER THE AI RESPONDS ---
+        if jawaban_akhir and not jawaban_akhir.startswith("Oops, it seems"):
             backend_supabase.table("chat_history").insert([
                 {"device_id": device_id, "role": "user", "content": user_text},
                 {"device_id": device_id, "role": "bot", "content": jawaban_akhir}

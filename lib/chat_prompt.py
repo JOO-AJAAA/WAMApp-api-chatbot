@@ -10,13 +10,13 @@ except Exception:  # pragma: no cover - fallback for environments without zonein
 
 def format_notifications_for_llm(notifications: List[Dict[str, Any]]) -> str:
     if not notifications:
-        return "Tidak ada riwayat anomali cuaca yang relevan."
+        return "No relevant weather anomaly history is available."
 
-    lines: List[str] = ["Riwayat anomali cuaca Terbaru:"]
+    lines: List[str] = ["Latest weather anomaly history:"]
     for item in notifications[:10]:
-        title = item.get("title") or "Tanpa judul"
+        title = item.get("title") or "Untitled"
         message = item.get("message") or item.get("content") or item.get("data") or ""
-        category = item.get("category") or "umum"
+        category = item.get("category") or "general"
         created_at = item.get("created_at") or item.get("time") or "unknown time"
         lines.append(f"- [{category}] {title}: {message} ({created_at})")
 
@@ -58,7 +58,7 @@ def _build_time_context(
     local_dt, timezone_label = _resolve_local_datetime(timezone_name, utc_offset_minutes)
 
     return (
-        f"Timezone user: {timezone_label}\n"
+        f"User timezone: {timezone_label}\n"
         f"Current local time: {local_dt.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"Current date: {local_dt.strftime('%A, %d %B %Y')}",
         local_dt,
@@ -69,34 +69,34 @@ def _build_time_style_instruction(local_dt: datetime) -> str:
     hour = local_dt.hour
 
     if 5 <= hour < 11:
-        periode = "pagi"
+        period = "morning"
         gaya = (
-            "Gunakan tone segar, ringan, memotivasi, dan actionable untuk memulai aktivitas. "
-            "Jika memberi saran, prioritaskan persiapan pagi hari dan rencana hingga siang."
+            "Use a fresh, light, motivating, and actionable tone to help the user start the day. "
+            "If giving advice, prioritize morning preparation and plans through midday."
         )
     elif 11 <= hour < 15:
-        periode = "siang"
+        period = "afternoon"
         gaya = (
-            "Gunakan tone praktis dan efisien. "
-            "Prioritaskan saran yang relevan untuk aktivitas puncak siang serta manajemen panas/cuaca aktif."
+            "Use a practical and efficient tone. "
+            "Prioritize advice relevant to peak midday activity and heat/weather management."
         )
     elif 15 <= hour < 19:
-        periode = "sore"
+        period = "evening"
         gaya = (
-            "Gunakan tone transisi yang suportif untuk akhir hari. "
-            "Berikan saran tindak lanjut hingga malam dengan fokus keamanan perjalanan/pulang."
+            "Use a supportive transition tone for the end of the day. "
+            "Provide follow-up advice into the night with a focus on travel/return safety."
         )
     else:
-        periode = "malam"
+        period = "night"
         gaya = (
-            "Gunakan tone lebih tenang dan ringkas. "
-            "Fokus pada keamanan malam, kenyamanan istirahat, dan rencana esok hari bila relevan."
+            "Use a calmer and more concise tone. "
+            "Focus on nighttime safety, rest comfort, and plans for tomorrow if relevant."
         )
 
     return (
         "[Context Assembly: Time-of-Day Response Style]\n"
-        f"Periode lokal user saat ini: {periode}.\n"
-        f"Instruksi gaya jawaban: {gaya}"
+        f"Current local period: {period}.\n"
+        f"Response style instruction: {gaya}"
     )
 
 
@@ -112,18 +112,18 @@ def build_llm_context(
     timezone_name: Optional[str],
     utc_offset_minutes: Optional[int],
 ) -> Dict[str, Any]:
-    konteks_list: List[str] = []
-    kategori_utama = "umum"
+    context_list: List[str] = []
+    primary_category = "general"
 
     if dokumen_ditemukan:
-        kategori_utama = dokumen_ditemukan[0].get("kategori", "umum")
+        primary_category = dokumen_ditemukan[0].get("kategori", "general")
         for doc in dokumen_ditemukan:
-            kategori_doc = doc.get("kategori", "umum")
-            isi_doc = doc.get("content", "")
-            konteks_list.append(f"[Kategori: {kategori_doc}]\n{isi_doc}")
-        konteks_gabungan = "\n\n".join(konteks_list)
+            category_doc = doc.get("kategori", "general")
+            doc_content = doc.get("content", "")
+            context_list.append(f"[Category: {category_doc}]\n{doc_content}")
+        combined_context = "\n\n".join(context_list)
     else:
-        konteks_gabungan = "[TIDAK ADA KONTEKS SPESIFIK DARI DATABASE UNTUK PERTANYAAN INI]"
+        combined_context = "[NO SPECIFIC DATABASE CONTEXT IS AVAILABLE FOR THIS QUESTION]"
 
     persona_mapping = {
         "mitigasi": "seorang ahli mitigasi iklim yang tegas, tenang, dan sangat peduli pada keselamatan. Nada bicaramu serius namun menenangkan, memberikan instruksi protektif yang jelas dan mudah diikuti.",
@@ -133,14 +133,16 @@ def build_llm_context(
         "umum": "asisten ahli meteorologi yang ramah, santai, dan suportif.",
     }
 
-    peran_spesifik = persona_mapping.get(kategori_utama, persona_mapping["edukasi"])
+    specific_role = persona_mapping.get(primary_category, persona_mapping["edukasi"])
 
-    instruksi_persona = f"""Kamu adalah WAMchat, kamu berada dalam aplikasi yang disebut dengan WAMApp data cuaca user berasal dari situ. Kamu adalah {peran_spesifik}
+    instruksi_persona = f"""You are WAMchat, and you are inside an application called WAMApp where the user's weather data comes from. You are {specific_role}
 
-ATURAN PENTING:
-1. JANGAN PERNAH menggunakan frasa kaku seperti 'berdasarkan teks', 'menurut database', 'berdasarkan informasi yang saya miliki', atau yang sejenisnya. Jawablah mengalir seolah pengetahuan itu murni dari pikiranmu.
-2. Gunakan referensi [Konteks Database] yang diberikan sebagai acuan fakta untuk menjawab.
-3. Jika [Konteks Database] menunjukkan TIDAK ADA KONTEKS atau pertanyaan melenceng jauh dari topik cuaca/alam, tetaplah jawab dengan sopan memakai pengetahuan umummu, TAPI berikan sedikit klarifikasi ramah dengan gaya personamu bahwa kamu asisten cuaca."""
+IMPORTANT RULES:
+1. NEVER use stiff phrases such as 'based on the text', 'according to the database', 'based on the information I have', or anything similar. Respond naturally as if the knowledge comes directly from your own mind.
+2. Use the provided [Database Context] as the factual basis for your answer.
+3. If [Database Context] shows NO CONTEXT or the question drifts far away from weather/nature topics, still answer politely using your general knowledge, BUT add a friendly clarification in your persona style that you are a weather assistant.
+4. Always reply in the same language as the user's latest message. If the user message is mixed-language, follow the dominant language of that message.
+"""
 
     additional_system = ""
     if system_instructions:
@@ -148,11 +150,11 @@ ATURAN PENTING:
     if assistant_instructions:
         additional_system += "\n\n" + assistant_instructions
 
-    # Instruksi penting: gunakan keterangan/label cuaca, bukan hanya kode numerik
+    # Important instruction: use weather descriptions/labels, not only numeric codes
     label_instruction = (
-        "[PENTING - FORMAT CUACA]\n"
-        "Saat menyebut kondisi cuaca dalam jawaban, gunakan keterangan yang dapat dibaca manusia (mis. 'Cerah', 'Hujan', 'Badai petir') bukannya hanya kode numerik. "
-        "Jika payload menyediakan keduanya, prioritaskan label/keterangan saat menyimpulkan kondisi atau memberi saran."
+        "[IMPORTANT - WEATHER FORMAT]\n"
+        "When describing weather conditions in your answer, use human-readable labels (e.g. 'Clear', 'Rain', 'Thunderstorm') instead of only numeric codes. "
+        "If the payload provides both, prioritize the label/description when inferring the condition or giving advice."
     )
     additional_system = label_instruction + "\n\n" + additional_system
 
@@ -162,15 +164,15 @@ ATURAN PENTING:
 
     context_assembly_instruction = (
         "[Context Assembly: Notification History]\n"
-        "Berikut ringkasan anomali cuaca cuaca terbaru untuk user. "
-        "Gunakan sebagai konteks tambahan saat menyusun jawaban, terutama untuk mitigasi dan tindak lanjut yang aman:\n"
+        "Below is a summary of the user's latest weather anomalies. "
+        "Use it as additional context when composing the answer, especially for mitigation and safe follow-up actions:\n"
         f"{notification_context}"
     )
 
     time_assembly_instruction = (
         "[Context Assembly: User Timezone]\n"
-        "Gunakan waktu lokal user ini sebagai referensi utama saat menyebut waktu, jadwal, kata 'sekarang', 'hari ini', 'malam ini', 'besok', dan estimasi waktu lainnya. "
-        "Jika user tidak menyebut zona waktu secara eksplisit, tetap ikuti timezone yang dikirim dari client atau offset UTC.\n"
+        "Use the user's local time as the primary reference when mentioning time, schedules, the words 'now', 'today', 'tonight', 'tomorrow', and any other time estimates. "
+        "If the user does not explicitly mention a timezone, still follow the timezone sent by the client or the UTC offset.\n"
         f"{time_context}"
     )
 
@@ -187,38 +189,33 @@ ATURAN PENTING:
 
     history_text = ""
     if history_data:
-        history_text = "Riwayat Percakapan Sebelumnya:\n"
+        history_text = "Previous conversation history:\n"
         for item in history_data:
-            nama = "User" if item.get("role") == "user" else "WAMchat"
-            history_text += f"{nama}: {item.get('content', '')}\n"
+            speaker = "User" if item.get("role") == "user" else "WAMchat"
+            history_text += f"{speaker}: {item.get('content', '')}\n"
         history_text += "\n"
 
     weather_text = ""
     if weather:
         try:
-            weather_text = "External Weather Snapshot:\n" + json.dumps(weather, ensure_ascii=False) + "\n\n"
+            weather_text = "External weather snapshot:\n" + json.dumps(weather, ensure_ascii=False) + "\n\n"
         except Exception:
-            weather_text = "External Weather Snapshot: (unserializable)\n\n"
+            weather_text = "External weather snapshot: (unserializable)\n\n"
 
     user_content_lengkap = (
-        f"{history_text}{weather_text}Konteks Database:\n{konteks_gabungan}\n\nPertanyaan User: {user_text}"
+        f"{history_text}{weather_text}Database Context:\n{combined_context}\n\nUser Question: {user_text}"
     )
 
     system_message = {"role": "system", "content": combined_system_instruction}
-    user_message = {"role": "user", "content": user_content_lengkap}
-
-
-    print("=== Debug Chat Context Assembly ===")
-    print(f"Combined System Instruction:\n{combined_system_instruction}")
-    # print(f"User Content:\n{user_content_lengkap}")
-    # print("user_message dict:", user_message)
-    
+    user_message = {"role": "user", "content": user_content_lengkap}    
     
     return {
-        "kategori_utama": kategori_utama,
+        "kategori_utama": primary_category,
         "combined_system_instruction": combined_system_instruction,
         "user_content_lengkap": user_content_lengkap,
         "system_message": system_message,
         "user_message": user_message,
-        "konteks_gabungan": konteks_gabungan,
+        "konteks_gabungan": combined_context,
+        "primary_category": primary_category,
+        "combined_context": combined_context,
     }
