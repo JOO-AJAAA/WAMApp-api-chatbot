@@ -77,6 +77,7 @@ class ChatRequest(BaseModel):
     assistant_instructions: Optional[str] = None
     timezone_name: Optional[str] = None
     utc_offset_minutes: Optional[int] = None
+    country_code: Optional[str] = None
 
 
 class ChatTokenRequest(BaseModel):
@@ -188,6 +189,7 @@ async def chat_rag(
             dokumen_ditemukan=dokumen_ditemukan,
             timezone_name=getattr(request, "timezone_name", None),
             utc_offset_minutes=getattr(request, "utc_offset_minutes", None),
+            country_code=getattr(request, "country_code", None),
         )
 
         combined_system_instruction = context_bundle["combined_system_instruction"]

@@ -7,18 +7,79 @@ try:
 except Exception:  # pragma: no cover - fallback for environments without zoneinfo
     ZoneInfo = None
 
+# Mapping of country codes to language names for translation prompts
+COUNTRY_LANGUAGE_MAP = {
+    'US': 'English',
+    'GB': 'English',
+    'AU': 'English',
+    'CA': 'English',
+    'NZ': 'English',
+    'IE': 'English',
+    'ID': 'Indonesian',
+    'MY': 'Malay',
+    'SG': 'English',
+    'TH': 'Thai',
+    'VN': 'Vietnamese',
+    'PH': 'English',
+    'JP': 'Japanese',
+    'KR': 'Korean',
+    'CN': 'Simplified Chinese',
+    'TW': 'Traditional Chinese',
+    'HK': 'Traditional Chinese',
+    'IN': 'English',
+    'BR': 'Portuguese',
+    'MX': 'Spanish',
+    'ES': 'Spanish',
+    'FR': 'French',
+    'DE': 'German',
+    'IT': 'Italian',
+    'RU': 'Russian',
+}
 
-def format_notifications_for_llm(notifications: List[Dict[str, Any]]) -> str:
+def _get_target_language(country_code: Optional[str]) -> str:
+    """Get language name from country code."""
+    if not country_code:
+        return 'Indonesian'
+    code = (country_code or '').upper().strip()
+    return COUNTRY_LANGUAGE_MAP.get(code, 'Indonesian')
+
+
+def _should_translate_notifications(country_code: Optional[str]) -> bool:
+    """Check if notifications should be translated (non-Indonesia location)."""
+    if not country_code:
+        return False
+    code = (country_code or '').upper().strip()
+    return code != 'ID'
+
+
+def format_notifications_for_llm(
+    notifications: List[Dict[str, Any]],
+    country_code: Optional[str] = None
+) -> str:
     if not notifications:
         return "No relevant weather anomaly history is available."
 
     lines: List[str] = ["Latest weather anomaly history:"]
+    
+    # Check if translation is needed
+    should_translate = _should_translate_notifications(country_code)
+    target_language = _get_target_language(country_code)
+    
     for item in notifications[:10]:
         title = item.get("title") or "Untitled"
         message = item.get("message") or item.get("content") or item.get("data") or ""
         category = item.get("category") or "general"
         created_at = item.get("created_at") or item.get("time") or "unknown time"
-        lines.append(f"- [{category}] {title}: {message} ({created_at})")
+        
+        # If translation is needed, add translation instruction to the LLM
+        if should_translate:
+            # Note: Actual translation will be done by the LLM using system instruction
+            # We just mark it here for the LLM context
+            lines.append(
+                f"- [{category}] {title}: {message} ({created_at}) [TRANSLATE_TO: {target_language}]"
+            )
+        else:
+            lines.append(f"- [{category}] {title}: {message} ({created_at})")
 
     return "\n".join(lines)
 
@@ -111,6 +172,7 @@ def build_llm_context(
     dokumen_ditemukan: Optional[List[Dict[str, Any]]],
     timezone_name: Optional[str],
     utc_offset_minutes: Optional[int],
+    country_code: Optional[str] = None,
 ) -> Dict[str, Any]:
     context_list: List[str] = []
     primary_category = "general"
@@ -142,6 +204,7 @@ IMPORTANT RULES:
 2. Use the provided [Database Context] as the factual basis for your answer.
 3. If [Database Context] shows NO CONTEXT or the question drifts far away from weather/nature topics, still answer politely using your general knowledge, BUT add a friendly clarification in your persona style that you are a weather assistant.
 4. Always reply in the same language as the user's latest message. If the user message is mixed-language, follow the dominant language of that message.
+5. NOTIFICATION CONTEXT: Notifications originate in Indonesian language as their default. If you see [TRANSLATE_TO: LanguageName] marker in a notification item, translate that notification's title and message to the specified language in your internal understanding before using it for context or recommendations. The final reply should still follow rule 4 (match user's language).
 """
 
     additional_system = ""
@@ -160,7 +223,7 @@ IMPORTANT RULES:
 
     time_context, local_dt = _build_time_context(timezone_name, utc_offset_minutes)
     time_style_instruction = _build_time_style_instruction(local_dt)
-    notification_context = format_notifications_for_llm(notifications_for_llm)
+    notification_context = format_notifications_for_llm(notifications_for_llm, country_code)
 
     context_assembly_instruction = (
         "[Context Assembly: Notification History]\n"
