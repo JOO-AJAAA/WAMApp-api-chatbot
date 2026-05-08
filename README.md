@@ -4,7 +4,7 @@
 
 ## Repository
 
-- **Backend Repo URL:** `https://github.com/<your-username>/<your-backend-repo>`
+- **Frontend Repo URL:** `https://github.com/YehezkielG/wamapp`
 
 ## Overview
 
